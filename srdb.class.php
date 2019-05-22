@@ -96,6 +96,11 @@
 class icit_srdb {
 
     /**
+     * @staticvar string Default SQL update query log filename.
+     */
+    const DEFAULT_SQL_LOG_FILENAME = 'update_queries.sql';
+
+    /**
      * @staticvar string MySQL PDO driver name.
      */
     const MYSQL_PDO_DRIVER      = 'mysql';
@@ -199,14 +204,19 @@ class icit_srdb {
                   WHEN TRUE THEN 'NO'
                   WHEN FALSE THEN 'YES'
               END AS \"Null\",
-              CASE(pg_attribute.attnum = any(pg_index.indkey))
-                  WHEN TRUE THEN 'PRI'
-                  WHEN FALSE THEN ''
-              END AS \"Key\",
+              (SELECT
+                  CASE(pg_attribute.attnum = any(pg_index.indkey))
+                      WHEN TRUE THEN 'PRI'
+                      WHEN FALSE THEN ''
+                  END
+                FROM pg_index
+                WHERE
+                  pg_class.oid = pg_index.indrelid
+                  AND pg_index.indisprimary
+              ) AS \"Key\",
               pg_attrdef.adsrc AS \"Default\"
             FROM
               pg_class
-                JOIN pg_index ON (pg_class.oid = pg_index.indrelid)
                 JOIN pg_namespace ON (pg_class.relnamespace = pg_namespace.oid)
                 JOIN pg_attribute ON (pg_class.oid = pg_attribute.attrelid)
                 LEFT JOIN pg_attrdef ON (pg_attribute.attrelid = pg_attrdef.adrelid AND pg_attribute.attnum = pg_attrdef.adnum)
@@ -214,7 +224,6 @@ class icit_srdb {
               pg_class.oid = :table::regclass
               AND pg_namespace.nspname = 'public'
               AND pg_attribute.attnum > 0
-              AND pg_index.indisprimary
             ORDER BY pg_attribute.attnum ASC
             ;",
 /*
@@ -368,6 +377,8 @@ class icit_srdb {
 	public $page_size = 50000;
 
 
+
+
 	/**
 	 * Searches for WP or Drupal context
 	 * Checks for $_POST data
@@ -405,7 +416,9 @@ class icit_srdb {
 			'pagesize' 			=> 50000,
 			'alter_engine' 		=> false,
 			'alter_collation' 	=> false,
-			'verbose'			=> false
+            'log_queries'       => '',
+            'sql_log_fh'        => NULL,
+			'verbose'			=> false,
 		), $args );
 
 		// handle exceptions
@@ -444,21 +457,38 @@ class icit_srdb {
 		$this->db_setup();
 
 		if ( $this->db_valid() ) {
+            
+            if ($this->log_queries) {
+                if (true === $this->log_queries) {
+                    $this->set('log_queries', self::DEFAULT_SQL_LOG_FILENAME);
+                }
+                $this->set('sql_log_fh', fopen($this->log_queries, 'w'));
+            }
 
-			// update engines
-			if ( $this->alter_engine ) {
-				$report = $this->update_engine( $this->alter_engine, $this->tables );
-			}
+            if (!$this->log_queries || $this->sql_log_fh) {
+                // update engines
+                if ( $this->alter_engine ) {
+                    $report = $this->update_engine( $this->alter_engine, $this->tables );
+                }
 
-			// update collation
-			elseif ( $this->alter_collation ) {
-				$report = $this->update_collation( $this->alter_collation, $this->tables );
-			}
+                // update collation
+                elseif ( $this->alter_collation ) {
+                    $report = $this->update_collation( $this->alter_collation, $this->tables );
+                }
 
-			// default search/replace action
-			else {
-				$report = $this->replacer( $this->search, $this->replace, $this->tables );
-			}
+                // default search/replace action
+                else {
+                    $report = $this->replacer( $this->search, $this->replace, $this->tables );
+                }
+                
+                if ($this->sql_log_fh) {
+                    fclose($this->sql_log_fh);
+                }
+
+            }
+            else {
+                $report = "ERROR: Failed to create SQL log file (" . $this->log_queries . ")!\n";
+            }
 
 		} else {
 
@@ -472,6 +502,7 @@ class icit_srdb {
 	}
 
 
+
 	/**
 	 * Terminates db connection
 	 *
@@ -481,6 +512,7 @@ class icit_srdb {
 		if ( $this->db_valid() )
 			$this->db_close();
 	}
+
 
 
 	public function get( $property ) {
@@ -495,6 +527,7 @@ class icit_srdb {
 	public function exceptions( $exception ) {
 		echo $exception->getMessage() . "\n";
 	}
+
 
 
 	public function errors( $no, $message, $file, $line ) {
@@ -741,6 +774,9 @@ class icit_srdb {
 
 
 	public function db_query( $query , $bindings = null) {
+        if ($this->sql_log_fh) {
+             fwrite($this->sql_log_fh, "$query\nPARAMS: " . print_r($bindings, TRUE));
+        }
 		if ( $this->use_pdo() )
             if ($bindings) {
                 $sth = $this->db->prepare( $query );
@@ -758,6 +794,9 @@ class icit_srdb {
 	}
 
 	public function db_update( $query ) {
+        if ($this->sql_log_fh) {
+             fwrite($this->sql_log_fh, "$query\n");
+        }
 		if ( $this->use_pdo() )
 			return $this->db->exec( $query );
 		else
@@ -859,7 +898,7 @@ class icit_srdb {
 		// some unserialised data cannot be re-serialised eg. SimpleXMLElements
 		try {
 
-			if ( is_string( $data ) && ( $unserialized = @unserialize( $data ) ) !== false ) {
+			if ( is_string( $data ) && ( $unserialized = @unserialize( $data, ["allowed_classes" => false] ) ) !== false ) {
 				$data = $this->recursive_unserialize_replace( $from, $to, $unserialized, true );
 			}
 
@@ -873,18 +912,18 @@ class icit_srdb {
 				unset( $_tmp );
 			}
 
-			// Submitted by Tina Matter
-			elseif ( is_object( $data ) ) {
-				// $data_class = get_class( $data );
-				$_tmp = $data; // new $data_class( );
-				$props = get_object_vars( $data );
-				foreach ( $props as $key => $value ) {
-					$_tmp->$key = $this->recursive_unserialize_replace( $from, $to, $value, false );
-				}
-
-				$data = $_tmp;
-				unset( $_tmp );
-			}
+			// // Submitted by Tina Matter
+			// elseif ( is_object( $data ) ) {
+			// 	// $data_class = get_class( $data );
+			// 	$_tmp = $data; // new $data_class( );
+			// 	$props = get_object_vars( $data );
+			// 	foreach ( $props as $key => $value ) {
+			// 		$_tmp->$key = $this->recursive_unserialize_replace( $from, $to, $value, false );
+			// 	}
+      // 
+			// 	$data = $_tmp;
+			// 	unset( $_tmp );
+			// }
 
 			else {
 				if ( is_string( $data ) ) {
@@ -947,8 +986,8 @@ class icit_srdb {
 						 'rows' => 0,
 						 'change' => 0,
 						 'updates' => 0,
-						 'start' => microtime( ),
-						 'end' => microtime( ),
+						 'start' => microtime(TRUE),
+						 'end' => microtime(TRUE),
 						 'errors' => array( ),
 						 'table_reports' => array( )
 						 );
@@ -958,8 +997,8 @@ class icit_srdb {
 						 'change' => 0,
 						 'changes' => array( ),
 						 'updates' => 0,
-						 'start' => microtime( ),
-						 'end' => microtime( ),
+						 'start' => microtime(TRUE ),
+						 'end' => microtime(TRUE),
 						 'errors' => array( ),
 						 );
 
@@ -998,20 +1037,20 @@ class icit_srdb {
 				$report[ 'tables' ]++;
 
 				// get primary key and columns
-				list( $primary_key, $columns ) = $this->get_columns( $table );
+				list( $primary_keys, $columns ) = $this->get_columns( $table );
 
-				if ( $primary_key === null ) {
+				if ( $primary_keys === null ) {
 					$this->add_error( "The table \"{$table}\" has no primary key. Changes will have to be made manually.", 'results' );
 					continue;
 				}
-				else if ( is_array($primary_key) ) {
-					$this->add_error( "The table \"{$table}\" has multiple primary keys (not supported). Changes will have to be made manually.", 'results' );
-					continue;
-				}
+				// else if ( is_array($primary_keys) ) {
+				// 	$this->add_error( "The table \"{$table}\" has multiple primary keys (not supported). Changes will have to be made manually.", 'results' );
+				// 	continue;
+				// }
 
 				// create new table report instance
 				$new_table_report = $table_report;
-				$new_table_report[ 'start' ] = microtime();
+				$new_table_report[ 'start' ] = microtime(TRUE);
 
 				$this->log( 'search_replace_table_start', $table, $search, $replace );
 
@@ -1042,76 +1081,97 @@ class icit_srdb {
 						$where_sql = array( );
 						$update = false;
 
-						foreach( $columns as $column ) {
+						foreach( $columns as $column_data ) {
+                            $column = $column_data[ 'Field' ];
 
 							$edited_data = $data_to_fix = $row[ $column ];
 
-                            // handle streams as strings
-                            if ( is_resource($data_to_fix) ) {
-                                if ( 'stream' == get_resource_type($data_to_fix) ) {
-                                    $edited_data = $data_to_fix = stream_get_contents($data_to_fix);
+                            if (!empty($edited_data)) {
+                                // handle streams as strings
+                                if ( is_resource($data_to_fix) ) {
+                                    if ( 'stream' == get_resource_type($data_to_fix) ) {
+                                        $edited_data = $data_to_fix = stream_get_contents($data_to_fix);
+                                    }
+                                    else {
+                                        $this->add_error( 'unsupported resource type: ' . get_resource_type($data_to_fix), 'results' );
+                                    }
                                 }
-                                else {
-                                    $this->add_error( 'unsupported resource type: ' . get_resource_type($data_to_fix), 'results' );
+                                
+                                //+val
+                                // handle bytea (binary strings) as strings
+                                if (!empty($data_to_fix)
+                                    && ('bytea' == $column_data[ 'Type' ])) {
+                                  // update reference data (decoded)
+                                  $data_to_fix = $edited_data = pg_unescape_bytea($data_to_fix);
                                 }
+                                
+							    //+multi if ( $primary_keys == $column ) {
+							    if ( in_array($column, $primary_keys) ) {
+							    	$where_sql[] = "{$column} = " . $this->db_escape( $data_to_fix );
+							    }
+                                
+							    // exclude cols
+							    if ( in_array( $column, $this->exclude_cols ) )
+							    	continue;
+                                
+							    // include cols
+							    if ( ! empty( $this->include_cols ) && ! in_array( $column, $this->include_cols ) )
+							    	continue;                            
+                                
+							    // Run a search replace on the data that'll respect the serialisation.
+							    $edited_data = $this->recursive_unserialize_replace( $search, $replace, $data_to_fix );
+                                
+							    // Something was changed
+							    if ( $edited_data != $data_to_fix ) {
+                                
+							    	$report[ 'change' ]++;
+							    	$new_table_report[ 'change' ]++;
+                                
+							    	// log first x changes
+							    	if ( $new_table_report[ 'change' ] <= $this->get( 'report_change_num' ) ) {
+							    		$new_table_report[ 'changes' ][] = array(
+							    			'row' => $new_table_report[ 'rows' ],
+							    			'column' => $column,
+							    			'from' => utf8_encode( is_string($data_to_fix)? $data_to_fix : '"' . gettype($data_to_fix) . '"'),
+							    			'to' => utf8_encode( $edited_data )
+							    		);
+							    	}
+                                
+                                    if ('bytea' == $column_data[ 'Type' ]) {
+                                        $bytea_data =  pg_escape_bytea($edited_data);
+                                        $update_sql[] = "{$column} = " . $this->db_escape( $bytea_data );
+                                    }
+                                    else{
+                                        $update_sql[] = "{$column} = " . $this->db_escape( $edited_data );
+                                    }
+							    	$update = true;
+                                
+							    }
+
                             }
-
-							if ( $primary_key == $column ) {
-								$where_sql[] = "{$column} = " . $this->db_escape( $data_to_fix );
-								continue;
-							}
-
-							// exclude cols
-							if ( in_array( $column, $this->exclude_cols ) )
-								continue;
-
-							// include cols
-							if ( ! empty( $this->include_cols ) && ! in_array( $column, $this->include_cols ) )
-								continue;
-
-							// Run a search replace on the data that'll respect the serialisation.
-							$edited_data = $this->recursive_unserialize_replace( $search, $replace, $data_to_fix );
-
-							// Something was changed
-							if ( $edited_data != $data_to_fix ) {
-
-								$report[ 'change' ]++;
-								$new_table_report[ 'change' ]++;
-
-								// log first x changes
-								if ( $new_table_report[ 'change' ] <= $this->get( 'report_change_num' ) ) {
-									$new_table_report[ 'changes' ][] = array(
-										'row' => $new_table_report[ 'rows' ],
-										'column' => $column,
-										'from' => utf8_encode( is_string($data_to_fix)? $data_to_fix : '"' . gettype($data_to_fix) . '"'),
-										'to' => utf8_encode( $edited_data )
-									);
-								}
-
-								$update_sql[] = "{$column} = " . $this->db_escape( $edited_data );
-								$update = true;
-
-							}
 
 						}
 
-						if ( $dry_run ) {
-							// nothing for this state
-						} elseif ( $update && ! empty( $where_sql ) ) {
+                        if ( $update && ! empty( $where_sql ) ) {
+                            $sql = 'UPDATE ' . $table . ' SET ' . implode( ', ', $update_sql ) . ' WHERE ' . implode( ' AND ', array_filter( $where_sql ) );
+                            if ( $dry_run ) {
+                                // nothing for this state, just print query
+                                if ($this->sql_log_fh) {
+                                    fwrite($this->sql_log_fh, "$sql\n");
+                                }
+                            } else {
 
-							$sql = 'UPDATE ' . $table . ' SET ' . implode( ', ', $update_sql ) . ' WHERE ' . implode( ' AND ', array_filter( $where_sql ) );
-							$result = $this->db_update( $sql );
+                                $result = $this->db_update( $sql );
 
-							if ( ! is_int( $result ) && ! $result ) {
+                                if ( ! is_int( $result ) && ! $result ) {
 
-								$this->add_error( $this->db_error( ), 'results' );
+                                    $this->add_error( $this->db_error( ), 'results' );
+                                } else {
 
-							} else {
-
-								$report[ 'updates' ]++;
-								$new_table_report[ 'updates' ]++;
-							}
-
+                                    $report[ 'updates' ]++;
+                                    $new_table_report[ 'updates' ]++;
+                                }
+                            }
 						}
 
 					}
@@ -1120,7 +1180,7 @@ class icit_srdb {
 
 				}
 
-				$new_table_report[ 'end' ] = microtime();
+				$new_table_report[ 'end' ] = microtime(TRUE);
 
 				// store table report in main
 				$report[ 'table_reports' ][ $table ] = $new_table_report;
@@ -1131,7 +1191,7 @@ class icit_srdb {
 
 		}
 
-		$report[ 'end' ] = microtime( );
+		$report[ 'end' ] = microtime(TRUE);
 
 		$this->log( 'search_replace_end', $search, $replace, $report );
 
@@ -1141,7 +1201,7 @@ class icit_srdb {
 
 	public function get_columns( $table ) {
 
-		$primary_key = null;
+		$primary_keys = array( );
 		$columns = array( );
 		// Get a list of columns in this table
         $columns_query = $this->get_sql_query('get_columns');
@@ -1150,22 +1210,15 @@ class icit_srdb {
 			$this->add_error( $this->db_error( ), 'db' );
 		} else {
 			while( $column = $this->db_fetch( $fields ) ) {
-				$columns[] = $column[ 'Field' ];
+				//+val $columns[] = $column[ 'Field' ];
+				$columns[] = $column;
 				if ( $column[ 'Key' ] == 'PRI' ) {
-                    if (isset($primary_key)) {
-                        if (!is_array($primary_key)) {
-                            $primary_key = array($primary_key);
-                        }
-                        $primary_key[] = $column[ 'Field' ];
-                    }
-                    else {
-					    $primary_key = $column[ 'Field' ];
-                    }
+                    $primary_keys[] = $column[ 'Field' ];
                 }
 			}
 		}
 
-		return array( $primary_key, $columns );
+		return array( $primary_keys, $columns );
 	}
 
 

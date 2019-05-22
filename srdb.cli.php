@@ -30,6 +30,7 @@ $opts = array(
 	'z' => 'dry-run',
 	'e:' => 'alter-engine:',
 	'a:' => 'alter-collation:',
+	'q:' => 'log-queries:',
 	'v::' => 'verbose::',
 	'help'
 );
@@ -117,6 +118,8 @@ ARGS
     Changes the database table to the specified collation
     eg. utf8_unicode_ci. If specified search/replace arguments
     are ignored. They will not be run simultaneously.
+  -q, --log-queries [<file>]
+    Output executed SQL queries to the given file.
   -v, --verbose [true|false]
     Defaults to true, can be set to false to run script silently.
   --help
@@ -178,6 +181,7 @@ class icit_srdb_cli extends icit_srdb {
 
 	public function log( $type = '' ) {
 
+
 		$args = array_slice( func_get_args(), 1 );
 
 		$output = "";
@@ -193,12 +197,12 @@ class icit_srdb_cli extends icit_srdb {
 				break;
 			case 'search_replace_table_end':
 				list( $table, $report ) = $args;
-				$time = number_format( $report[ 'end' ] - $report[ 'start' ], 8 );
+				$time = number_format( floatval($report[ 'end' ]) - floatval($report[ 'start' ]), 8 );
 				$output .= "{$table}: {$report['rows']} rows, {$report['change']} changes found, {$report['updates']} updates made in {$time} seconds";
 				break;
 			case 'search_replace_end':
 				list( $search, $replace, $report ) = $args;
-				$time = number_format( $report[ 'end' ] - $report[ 'start' ], 8 );
+				$time = number_format( floatval($report[ 'end' ]) - floatval($report[ 'start' ]), 8 );
 				$dry_run_string = $this->dry_run ? "would have been" : "were";
 				$output .= "
 Replacing {$search} with {$replace} on {$report['tables']} tables with {$report['rows']} rows
@@ -220,6 +224,7 @@ It took {$time} seconds";
 			echo $output . "\n";
 
 	}
+
 
 }
 
