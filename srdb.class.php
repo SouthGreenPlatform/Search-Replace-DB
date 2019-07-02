@@ -898,7 +898,7 @@ class icit_srdb {
 		// some unserialised data cannot be re-serialised eg. SimpleXMLElements
 		try {
 
-			if ( is_string( $data ) && ( $unserialized = @unserialize( $data ) ) !== false ) {
+			if ( is_string( $data ) && ( $unserialized = @unserialize( $data, ["allowed_classes" => false] ) ) !== false ) {
 				$data = $this->recursive_unserialize_replace( $from, $to, $unserialized, true );
 			}
 
@@ -912,18 +912,18 @@ class icit_srdb {
 				unset( $_tmp );
 			}
 
-			// Submitted by Tina Matter
-			elseif ( is_object( $data ) ) {
-				// $data_class = get_class( $data );
-				$_tmp = $data; // new $data_class( );
-				$props = get_object_vars( $data );
-				foreach ( $props as $key => $value ) {
-					$_tmp->$key = $this->recursive_unserialize_replace( $from, $to, $value, false );
-				}
-
-				$data = $_tmp;
-				unset( $_tmp );
-			}
+			// // Submitted by Tina Matter
+			// elseif ( is_object( $data ) ) {
+			// 	// $data_class = get_class( $data );
+			// 	$_tmp = $data; // new $data_class( );
+			// 	$props = get_object_vars( $data );
+			// 	foreach ( $props as $key => $value ) {
+			// 		$_tmp->$key = $this->recursive_unserialize_replace( $from, $to, $value, false );
+			// 	}
+      // 
+			// 	$data = $_tmp;
+			// 	unset( $_tmp );
+			// }
 
 			else {
 				if ( is_string( $data ) ) {
